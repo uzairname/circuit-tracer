@@ -297,3 +297,71 @@ def compute_graph_scores(graph: Graph) -> tuple[float, float]:
     completeness_score = (non_error_fractions * output_influence).sum() / output_influence.sum()
 
     return replacement_score.item(), completeness_score.item()
+
+
+def compute_graph_scores_masked(
+    graph: Graph,
+    node_mask: torch.Tensor,
+    edge_mask: torch.Tensor,
+) -> tuple[float, float]:
+    """Compute graph scores for a pruned graph defined by node and edge masks.
+
+    This is a variant of compute_graph_scores that evaluates the quality of a
+    pruned subgraph without modifying the original graph object.
+
+    Args:
+        graph: The original computation graph.
+        node_mask: Boolean tensor indicating which nodes are kept in the pruned graph.
+        edge_mask: Boolean tensor indicating which edges are kept in the pruned graph.
+
+    Returns:
+        tuple[float, float]: A tuple containing:
+            - replacement_score: Fraction of token-to-logit influence through features (0-1)
+            - completeness_score: Weighted fraction of non-error inputs across all nodes (0-1)
+    """
+    n_logits = len(graph.logit_tokens)
+    n_tokens = len(graph.input_tokens)
+    n_features = len(graph.selected_features)
+    error_start = n_features
+    error_end = error_start + n_tokens * graph.cfg.n_layers
+    token_end = error_end + n_tokens
+
+    # Ensure masks are on the same device as the graph
+    device = graph.adjacency_matrix.device
+    node_mask = node_mask.to(device)
+    edge_mask = edge_mask.to(device)
+
+    # Create masked adjacency matrix
+    masked_matrix = graph.adjacency_matrix.clone()
+    # Zero out edges not in edge_mask
+    masked_matrix = masked_matrix * edge_mask.float()
+    # Zero out rows and columns for pruned nodes
+    masked_matrix[~node_mask] = 0
+    masked_matrix[:, ~node_mask] = 0
+
+    logit_weights = torch.zeros(
+        masked_matrix.shape[0], device=device
+    )
+    logit_weights[-n_logits:] = graph.logit_probabilities
+
+    normalized_matrix = normalize_matrix(masked_matrix)
+    node_influence = compute_influence(normalized_matrix, logit_weights)
+    token_influence = node_influence[error_end:token_end].sum()
+    error_influence = node_influence[error_start:error_end].sum()
+
+    # Handle edge case where both are zero
+    if token_influence + error_influence == 0:
+        replacement_score = torch.tensor(0.0)
+    else:
+        replacement_score = token_influence / (token_influence + error_influence)
+
+    non_error_fractions = 1 - normalized_matrix[:, error_start:error_end].sum(dim=-1)
+    output_influence = node_influence + logit_weights
+    
+    # Handle edge case where output_influence is zero
+    if output_influence.sum() == 0:
+        completeness_score = torch.tensor(0.0)
+    else:
+        completeness_score = (non_error_fractions * output_influence).sum() / output_influence.sum()
+
+    return replacement_score.item(), completeness_score.item()
