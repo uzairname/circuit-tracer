@@ -186,6 +186,8 @@ def prune_graph(
         - edge_mask: Boolean tensor indicating which edges to keep
         - cumulative_scores: Tensor of cumulative influence scores for each node
     """
+    
+    print(f"pruning graph")
 
     if node_threshold > 1.0 or node_threshold < 0.0:
         raise ValueError("node_threshold must be between 0.0 and 1.0")
