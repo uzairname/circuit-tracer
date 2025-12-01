@@ -1,5 +1,7 @@
 
 import torch
+import random
+import math
 from typing import List, Tuple, Dict, Optional, Union
 from dataclasses import dataclass
 from tqdm import tqdm
@@ -8,6 +10,157 @@ from experiments.evaluator import MultiGPUGraphEvaluator
 from experiments.individual import Individual
 from circuit_tracer.graph import Graph, compute_graph_scores_masked, compute_node_influence, compute_edge_influence, normalize_matrix, compute_influence
 from experiments.models import EAHyperparameters
+
+
+# ==============================================================================
+# NSGA-II Core Functions
+# ==============================================================================
+
+def fast_non_dominated_sort(population: List[Individual]) -> List[List[Individual]]:
+    """
+    Fast non-dominated sorting algorithm from NSGA-II.
+    
+    Assigns each individual to a Pareto front (rank).
+    Front 0 contains non-dominated solutions (Pareto optimal).
+    Front 1 contains solutions dominated only by front 0, etc.
+    
+    Time complexity: O(M * N^2) where M is number of objectives, N is population size.
+    
+    Args:
+        population: List of evaluated individuals
+        
+    Returns:
+        List of fronts, where each front is a list of individuals
+    """
+    n = len(population)
+    
+    if n == 0:
+        return []
+    
+    # S[p] = set of individuals that p dominates
+    # n[p] = number of individuals that dominate p
+    S = [[] for _ in range(n)]
+    domination_count = [0] * n
+    
+    fronts = [[]]  # fronts[i] = list of individuals in front i
+    
+    for p in range(n):
+        for q in range(n):
+            if p == q:
+                continue
+            if population[p].dominates(population[q]):
+                S[p].append(q)
+            elif population[q].dominates(population[p]):
+                domination_count[p] += 1
+        
+        if domination_count[p] == 0:
+            population[p].rank = 0
+            fronts[0].append(population[p])
+  
+    # If no non-dominated individuals found (shouldn't happen with valid objectives),
+    # put all individuals in front 0 as fallback
+    if not fronts[0]:
+        for ind in population:
+            ind.rank = 0
+        fronts[0] = population[:]
+        return fronts
+    
+    i = 0
+    while i < len(fronts) and fronts[i]:
+        next_front = []
+        for p_ind in fronts[i]:
+            p = population.index(p_ind)
+            for q in S[p]:
+                domination_count[q] -= 1
+                if domination_count[q] == 0:
+                    population[q].rank = i + 1
+                    next_front.append(population[q])
+        i += 1
+        if next_front:
+            fronts.append(next_front)
+    
+    # Remove empty last front if exists
+    while fronts and not fronts[-1]:
+        fronts.pop()
+    
+    return fronts
+
+
+def crowding_distance_assignment(front: List[Individual], n_objectives: int = 2):
+    """
+    Compute crowding distance for individuals in a front.
+    
+    Crowding distance measures how close an individual is to its neighbors
+    in objective space. Higher distance = more isolated = more valuable for diversity.
+    
+    Boundary solutions (best/worst in any objective) get infinite distance.
+    
+    Args:
+        front: List of individuals in the same Pareto front
+        n_objectives: Number of objectives (default 2)
+    """
+    n = len(front)
+    if n == 0:
+        return
+    
+    # Initialize crowding distance
+    for ind in front:
+        ind.crowding_distance = 0.0
+    
+    if n <= 2:
+        for ind in front:
+            ind.crowding_distance = float('inf')
+        return
+    
+    for m in range(n_objectives):
+        # Sort by objective m
+        # Objective 0 (quality): maximize -> sort descending
+        # Objective 1 (complexity): minimize -> sort ascending
+        if m == 0:
+            sorted_front = sorted(front, key=lambda x: x.objectives[m], reverse=True)
+        else:
+            sorted_front = sorted(front, key=lambda x: x.objectives[m], reverse=False)
+        
+        # Boundary points get infinite distance
+        sorted_front[0].crowding_distance = float('inf')
+        sorted_front[-1].crowding_distance = float('inf')
+        
+        # Compute range for normalization
+        f_max = sorted_front[0].objectives[m]
+        f_min = sorted_front[-1].objectives[m]
+        obj_range = abs(f_max - f_min)
+        
+        if obj_range < 1e-10:
+            continue  # All same value, skip
+        
+        # Compute crowding distance
+        for i in range(1, n - 1):
+            if sorted_front[i].crowding_distance != float('inf'):
+                distance = abs(sorted_front[i-1].objectives[m] - sorted_front[i+1].objectives[m])
+                sorted_front[i].crowding_distance += distance / obj_range
+
+
+def crowded_comparison_key(ind: Individual) -> Tuple[int, float]:
+    """
+    Key function for sorting by crowded comparison.
+    
+    Lower rank is better, higher crowding distance is better.
+    Returns tuple for sorting: (rank, -crowding_distance)
+    """
+    return (ind.rank, -ind.crowding_distance)
+
+
+def binary_tournament_selection(population: List[Individual]) -> Individual:
+    """
+    Binary tournament selection using crowded comparison.
+    
+    Randomly select two individuals and return the better one
+    based on Pareto rank and crowding distance.
+    """
+    a, b = random.sample(population, 2)
+    if a.crowded_comparison(b) >= 0:
+        return a
+    return b
 
 
 
@@ -252,11 +405,16 @@ class GraphPrunerEA:
         return node_mask, edge_mask
 
     def evaluate(self, individual: Individual):
-        """Compute fitness for an individual."""
+        """
+        Compute objectives for an individual (NSGA-II multi-objective).
+        
+        Objectives:
+            0: Quality (maximize) = w_completeness * completeness + w_replacement * replacement
+            1: Complexity (minimize) = w_node * log(nodes) + w_edge * log(edges)
+        """
         node_mask, edge_mask = self.decode(individual)
         
         # Compute graph scores
-        # This is the expensive part
         replacement, completeness = compute_graph_scores_masked(
             self.graph, node_mask, edge_mask
         )
@@ -264,27 +422,32 @@ class GraphPrunerEA:
         n_nodes = int(node_mask.sum().item())
         n_edges = int(edge_mask.sum().item())
         
-        # Calculate fitness
-        # Maximize replacement & completeness, Minimize log(nodes) & log(edges)
-        # Use log to handle vastly different magnitudes (edges ~ nodes^2)
-        import math
+        # Compute objectives
         log_nodes = math.log(max(n_nodes, 1))
         log_edges = math.log(max(n_edges, 1))
         
-        fitness = (
+        # Objective 0: Quality (maximize)
+        quality = (
             self.hp.w_completeness * completeness +
-            self.hp.w_replacement * replacement -
-            self.hp.w_complexity_node * log_nodes -
+            self.hp.w_replacement * replacement
+        )
+        
+        # Objective 1: Complexity (minimize)
+        complexity = (
+            self.hp.w_complexity_node * log_nodes +
             self.hp.w_complexity_edge * log_edges
         )
         
-        individual.fitness = fitness
+        individual.objectives = [quality, complexity]
         individual.completeness = completeness
         individual.replacement = replacement
         individual.n_nodes = n_nodes
         individual.n_edges = n_edges
         
-        return fitness
+        # Legacy fitness (for backwards compatibility)
+        individual.fitness = quality - complexity
+        
+        return individual.objectives
 
     def decode_batch(self, individuals: List[Individual]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -694,19 +857,19 @@ class GraphPrunerEA:
                 if random.random() < 0.5:
                     ind.force_exclude_edges.clear()
 
-    def run(self, use_batch: bool = True) -> Tuple[Individual, Dict[str, List]]:
+    def run(self, use_batch: bool = True) -> Tuple[List[Individual], Dict[str, List]]:
         """
-        Run the evolutionary algorithm.
+        Run the NSGA-II evolutionary algorithm.
         
         Args:
             use_batch: If True, use batched parallel evaluation for fitness.
                       If False, evaluate individuals one at a time.
         
         Returns:
-            Tuple of (best individual found, history dict with tracking info)
+            Tuple of (Pareto front individuals, history dict with tracking info)
         """
         if self.verbose:
-            print("Starting Evolutionary Algorithm...")
+            print("Starting NSGA-II Multi-Objective Evolutionary Algorithm...")
         population = self.initialize_population()
         
         if self.verbose:
@@ -715,11 +878,14 @@ class GraphPrunerEA:
         # Initialize history tracking
         history = {
             'generation': [],
-            'best_fitness': [],
+            'pareto_front_size': [],
+            'best_quality': [],         # Best objective 0 (quality)
+            'best_complexity': [],      # Best objective 1 (complexity) - lower is better
             'best_n_nodes': [],
             'best_n_edges': [],
             'best_completeness': [],
-            'best_replacement': []
+            'best_replacement': [],
+            'hypervolume': [],          # Optional: hypervolume indicator
         }
         
         # Evaluate initial population
@@ -727,38 +893,44 @@ class GraphPrunerEA:
             self.evaluate_batch(population)
         else:
             for ind in population:
-                if self.verbose:
-                    print(f"evaluating individual {ind}")
                 self.evaluate(ind)
             
         if self.verbose:
             print("Initial evaluation complete.")
-            
-        best_ind = max(population, key=lambda x: x.fitness)
+            # Debug: print sample objectives
+            if population:
+                print(f"Sample individual objectives: {population[0].objectives}")
+        
+        # Initial non-dominated sorting and crowding distance
+        fronts = fast_non_dominated_sort(population)
+        
+        if self.verbose:
+            print(f"Number of fronts: {len(fronts)}")
+            if fronts:
+                print(f"Front 0 size: {len(fronts[0])}")
+        
+        for front in fronts:
+            crowding_distance_assignment(front, n_objectives=self.hp.n_objectives)
         
         # Record initial generation (generation 0)
-        history['generation'].append(0)
-        history['best_fitness'].append(best_ind.fitness)
-        history['best_n_nodes'].append(best_ind.n_nodes)
-        history['best_n_edges'].append(best_ind.n_edges)
-        history['best_completeness'].append(best_ind.completeness)
-        history['best_replacement'].append(best_ind.replacement)
+        pareto_front = fronts[0] if fronts else []
+        self._record_history(history, 0, pareto_front)
         
         for gen in range(self.hp.n_generations):
             if self.verbose:
                 print(f"\n=== Generation {gen+1}/{self.hp.n_generations} ===")
-                print("Best Individual:")
-                best_ind.print_summary()
+                print(f"Pareto front size: {len(pareto_front)}")
+                if pareto_front:
+                    best_quality = max(pareto_front, key=lambda x: x.objectives[0])
+                    print("Best quality individual:")
+                    best_quality.print_summary()
             
-            new_pop = []
-            
-            # Elitism: keep best
-            new_pop.append(best_ind.clone())
-            
-            while len(new_pop) < self.hp.population_size:
-                # Tournament selection
-                p1 = self.tournament_select(population)
-                p2 = self.tournament_select(population)
+            # Create offspring population using binary tournament selection
+            offspring = []
+            while len(offspring) < self.hp.population_size:
+                # Tournament selection using crowded comparison
+                p1 = binary_tournament_selection(population)
+                p2 = binary_tournament_selection(population)
                 
                 # Crossover
                 c1, c2 = self.crossover(p1, p2)
@@ -767,45 +939,141 @@ class GraphPrunerEA:
                 self.mutate(c1)
                 self.mutate(c2)
                 
-                new_pop.extend([c1, c2])
-                
-            # Truncate to pop size
-            population = new_pop[:self.hp.population_size]
+                offspring.extend([c1, c2])
             
-            # Evaluate new individuals
+            # Truncate offspring to population size
+            offspring = offspring[:self.hp.population_size]
+            
+            # Evaluate offspring
             if use_batch:
-                # Collect individuals that need evaluation
-                to_evaluate = [ind for ind in population if ind.fitness == -float('inf')]
+                to_evaluate = [ind for ind in offspring if not ind.is_evaluated()]
                 if to_evaluate:
                     self.evaluate_batch(to_evaluate)
             else:
-                for ind in population:
-                    if ind.fitness == -float('inf'):  # Only evaluate new
+                for ind in offspring:
+                    if not ind.is_evaluated():
                         self.evaluate(ind)
             
-            # Update best
-            current_best = max(population, key=lambda x: x.fitness)
-            if current_best.fitness > best_ind.fitness:
-                best_ind = current_best.clone()
+            # Combine parent and offspring populations
+            combined = population + offspring
             
-            # Record history for this generation
-            history['generation'].append(gen + 1)
-            history['best_fitness'].append(best_ind.fitness)
-            history['best_n_nodes'].append(best_ind.n_nodes)
-            history['best_n_edges'].append(best_ind.n_edges)
-            history['best_completeness'].append(best_ind.completeness)
-            history['best_replacement'].append(best_ind.replacement)
+            # Non-dominated sorting on combined population
+            fronts = fast_non_dominated_sort(combined)
+            
+            # Select next generation using NSGA-II selection
+            population = self._nsga2_selection(fronts, self.hp.population_size)
+            
+            # Update pareto front (front 0 of new population)
+            fronts = fast_non_dominated_sort(population)
+            for front in fronts:
+                crowding_distance_assignment(front, n_objectives=self.hp.n_objectives)
+            pareto_front = fronts[0] if fronts else []
+            
+            # Record history
+            self._record_history(history, gen + 1, pareto_front)
                 
-        return best_ind, history
+        return pareto_front, history
+    
+    def _nsga2_selection(self, fronts: List[List[Individual]], pop_size: int) -> List[Individual]:
+        """
+        NSGA-II environmental selection.
+        
+        Fill the new population by adding complete fronts until 
+        the next front would exceed pop_size. Then use crowding 
+        distance to select from the last front.
+        """
+        new_population = []
+        
+        for front in fronts:
+            if len(new_population) + len(front) <= pop_size:
+                # Add entire front
+                new_population.extend(front)
+            else:
+                # Need to select from this front
+                remaining = pop_size - len(new_population)
+                
+                # Compute crowding distance for this front
+                crowding_distance_assignment(front, n_objectives=self.hp.n_objectives)
+                
+                # Sort by crowding distance (descending) and take top remaining
+                front.sort(key=lambda x: x.crowding_distance, reverse=True)
+                new_population.extend(front[:remaining])
+                break
+        
+        return new_population
+    
+    def _record_history(self, history: Dict, generation: int, pareto_front: List[Individual]):
+        """Record statistics for a generation."""
+        history['generation'].append(generation)
+        history['pareto_front_size'].append(len(pareto_front))
+        
+        if pareto_front:
+            best_quality_ind = max(pareto_front, key=lambda x: x.objectives[0])
+            best_complexity_ind = min(pareto_front, key=lambda x: x.objectives[1])
+            
+            history['best_quality'].append(best_quality_ind.objectives[0])
+            history['best_complexity'].append(best_complexity_ind.objectives[1])
+            history['best_n_nodes'].append(best_complexity_ind.n_nodes)
+            history['best_n_edges'].append(best_complexity_ind.n_edges)
+            history['best_completeness'].append(best_quality_ind.completeness)
+            history['best_replacement'].append(best_quality_ind.replacement)
+            
+            # Simple hypervolume approximation (area under Pareto front)
+            # Reference point: (0, max_complexity * 1.1)
+            try:
+                hv = self._compute_hypervolume(pareto_front)
+                history['hypervolume'].append(hv)
+            except:
+                history['hypervolume'].append(0.0)
+        else:
+            # Empty front - shouldn't happen
+            history['best_quality'].append(0.0)
+            history['best_complexity'].append(float('inf'))
+            history['best_n_nodes'].append(0)
+            history['best_n_edges'].append(0)
+            history['best_completeness'].append(0.0)
+            history['best_replacement'].append(0.0)
+            history['hypervolume'].append(0.0)
+    
+    def _compute_hypervolume(self, pareto_front: List[Individual]) -> float:
+        """
+        Compute 2D hypervolume indicator.
+        
+        Reference point: (0, max_complexity * 1.1)
+        Higher hypervolume = better Pareto front.
+        """
+        if not pareto_front:
+            return 0.0
+        
+        # Sort by quality (objective 0) descending
+        sorted_front = sorted(pareto_front, key=lambda x: x.objectives[0], reverse=True)
+        
+        # Reference point
+        ref_quality = 0.0
+        ref_complexity = max(ind.objectives[1] for ind in pareto_front) * 1.1 + 1.0
+        
+        hypervolume = 0.0
+        prev_complexity = ref_complexity
+        
+        for ind in sorted_front:
+            quality = ind.objectives[0] - ref_quality
+            complexity_diff = prev_complexity - ind.objectives[1]
+            
+            if quality > 0 and complexity_diff > 0:
+                hypervolume += quality * complexity_diff
+            
+            prev_complexity = ind.objectives[1]
+        
+        return hypervolume
 
-    def tournament_select(self, population, k=3):
-        candidates = random.sample(population, k)
-        return max(candidates, key=lambda x: x.fitness)
-
-import random
-
-
-
+    def tournament_select(self, population: List[Individual], k: int = 2) -> Individual:
+        """
+        Binary tournament selection using crowded comparison.
+        
+        This is kept for backwards compatibility but NSGA-II uses
+        binary_tournament_selection function directly.
+        """
+        return binary_tournament_selection(population)
 
 
 def create_individual(
@@ -838,10 +1106,13 @@ def run_ea_optimization(
     use_batch: bool = True, 
     gpu_ids: Optional[List[int]] = None,
     max_batch_per_gpu: int = 8,
-    hp: EAHyperparameters=EAHyperparameters(),
-):
+    hp: EAHyperparameters = EAHyperparameters(),
+) -> Dict:
     """
-    Entry point for hyperparameter optimization.
+    Entry point for NSGA-II multi-objective optimization.
+    
+    Returns a Pareto front of solutions representing different trade-offs
+    between quality (completeness + replacement) and complexity (nodes + edges).
     
     Args:
         graph: The computation graph to optimize pruning for.
@@ -851,10 +1122,14 @@ def run_ea_optimization(
                  If None, auto-detects available GPUs.
         max_batch_per_gpu: Maximum individuals to evaluate at once per GPU.
                           Lower values use less memory. Default 8.
-        **kwargs: Override default EAHyperparameters.
+        hp: EAHyperparameters configuration.
         
     Returns:
-        Dictionary with best individual's results.
+        Dictionary with:
+            - pareto_front: List of dicts, each representing a non-dominated solution
+            - best_quality: Individual with highest quality score
+            - best_complexity: Individual with lowest complexity
+            - history: Dict tracking evolution progress
     """
     ea = GraphPrunerEA(
         graph, 
@@ -863,15 +1138,100 @@ def run_ea_optimization(
         max_batch_per_gpu=max_batch_per_gpu,
         verbose=verbose
     )
-    best_ind, history = ea.run(use_batch=use_batch)
+    pareto_front, history = ea.run(use_batch=use_batch)
+    
+    # Handle empty pareto front (shouldn't happen but guard against it)
+    if not pareto_front:
+        raise ValueError("NSGA-II returned empty Pareto front. Check that graph is valid.")
+    
+    # Convert Pareto front to serializable format
+    pareto_results = []
+    for ind in pareto_front:
+        pareto_results.append({
+            "objectives": ind.objectives.copy(),
+            "quality": ind.objectives[0],
+            "complexity": ind.objectives[1],
+            "completeness": ind.completeness,
+            "replacement": ind.replacement,
+            "n_nodes": ind.n_nodes,
+            "n_edges": ind.n_edges,
+            "node_thresholds": ind.node_thresholds.tolist(),
+            "edge_thresholds": ind.edge_thresholds.tolist(),
+            "rank": ind.rank,
+            "crowding_distance": ind.crowding_distance,
+        })
+    
+    # Find extreme solutions
+    best_quality_ind = max(pareto_front, key=lambda x: x.objectives[0])
+    best_complexity_ind = min(pareto_front, key=lambda x: x.objectives[1])
+    
+    # Also provide a "balanced" solution (knee point approximation)
+    # Normalized objectives to find point closest to ideal
+    if len(pareto_front) > 2:
+        quality_vals = [ind.objectives[0] for ind in pareto_front]
+        complexity_vals = [ind.objectives[1] for ind in pareto_front]
+        
+        q_min, q_max = min(quality_vals), max(quality_vals)
+        c_min, c_max = min(complexity_vals), max(complexity_vals)
+        
+        q_range = q_max - q_min if q_max > q_min else 1.0
+        c_range = c_max - c_min if c_max > c_min else 1.0
+        
+        # Find solution closest to ideal point (max quality, min complexity)
+        best_balanced = min(
+            pareto_front,
+            key=lambda ind: (
+                ((q_max - ind.objectives[0]) / q_range) ** 2 +
+                ((ind.objectives[1] - c_min) / c_range) ** 2
+            )
+        )
+    else:
+        best_balanced = best_quality_ind
     
     return {
-        "fitness": best_ind.fitness,
-        "completeness": best_ind.completeness,
-        "replacement": best_ind.replacement,
-        "n_nodes": best_ind.n_nodes,
-        "n_edges": best_ind.n_edges,
-        "node_thresholds": best_ind.node_thresholds.tolist(),
-        "edge_thresholds": best_ind.edge_thresholds.tolist(),
+        "pareto_front": pareto_results,
+        "pareto_front_size": len(pareto_front),
+        
+        # Best quality solution (for backwards compatibility)
+        "fitness": best_quality_ind.fitness,
+        "completeness": best_quality_ind.completeness,
+        "replacement": best_quality_ind.replacement,
+        "n_nodes": best_quality_ind.n_nodes,
+        "n_edges": best_quality_ind.n_edges,
+        "node_thresholds": best_quality_ind.node_thresholds.tolist(),
+        "edge_thresholds": best_quality_ind.edge_thresholds.tolist(),
+        
+        # Extreme and balanced solutions
+        "best_quality": {
+            "quality": best_quality_ind.objectives[0],
+            "complexity": best_quality_ind.objectives[1],
+            "completeness": best_quality_ind.completeness,
+            "replacement": best_quality_ind.replacement,
+            "n_nodes": best_quality_ind.n_nodes,
+            "n_edges": best_quality_ind.n_edges,
+            "node_thresholds": best_quality_ind.node_thresholds.tolist(),
+            "edge_thresholds": best_quality_ind.edge_thresholds.tolist(),
+        },
+        "best_complexity": {
+            "quality": best_complexity_ind.objectives[0],
+            "complexity": best_complexity_ind.objectives[1],
+            "completeness": best_complexity_ind.completeness,
+            "replacement": best_complexity_ind.replacement,
+            "n_nodes": best_complexity_ind.n_nodes,
+            "n_edges": best_complexity_ind.n_edges,
+            "node_thresholds": best_complexity_ind.node_thresholds.tolist(),
+            "edge_thresholds": best_complexity_ind.edge_thresholds.tolist(),
+        },
+        "balanced": {
+            "quality": best_balanced.objectives[0],
+            "complexity": best_balanced.objectives[1],
+            "completeness": best_balanced.completeness,
+            "replacement": best_balanced.replacement,
+            "n_nodes": best_balanced.n_nodes,
+            "n_edges": best_balanced.n_edges,
+            "node_thresholds": best_balanced.node_thresholds.tolist(),
+            "edge_thresholds": best_balanced.edge_thresholds.tolist(),
+        },
+        
         "history": history
     }

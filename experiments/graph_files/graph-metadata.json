@@ -1,32 +1,6 @@
 {
   "graphs": [
     {
-      "slug": "dallas-austin",
-      "scan": "mntss/gemma-scope-transcoders",
-      "transcoder_list": [],
-      "prompt_tokens": [
-        "<bos>",
-        "The",
-        " war",
-        " lasted",
-        " from",
-        " the",
-        " year",
-        " ",
-        "1",
-        "7",
-        "1",
-        "1",
-        " to",
-        " ",
-        "1",
-        "7"
-      ],
-      "prompt": "<bos>The war lasted from the year 1711 to 17",
-      "node_threshold": 0.4,
-      "schema_version": 1
-    },
-    {
       "slug": "ndag_ea",
       "scan": "mntss/gemma-scope-transcoders",
       "transcoder_list": [],
@@ -59,6 +33,84 @@
         "N"
       ],
       "prompt": "<bos>The National Digital Analytics Group (N",
+      "node_threshold": 0.8,
+      "schema_version": 1
+    },
+    {
+      "slug": "dallas_ea",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "The",
+        " capital",
+        " of",
+        " the",
+        " state",
+        " containing",
+        " Dallas",
+        " is"
+      ],
+      "prompt": "<bos>The capital of the state containing Dallas is",
+      "node_threshold": 0.8978592753410339,
+      "schema_version": 1
+    },
+    {
+      "slug": "dallas_baseline",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "The",
+        " capital",
+        " of",
+        " the",
+        " state",
+        " containing",
+        " Dallas",
+        " is"
+      ],
+      "prompt": "<bos>The capital of the state containing Dallas is",
+      "node_threshold": 0.8,
+      "schema_version": 1
+    },
+    {
+      "slug": "ngsa_ea",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "Non",
+        "-",
+        "dominated",
+        " Sorting",
+        " Genetic",
+        " Algorithm",
+        " II",
+        " (",
+        "N"
+      ],
+      "prompt": "<bos>Non-dominated Sorting Genetic Algorithm II (N",
+      "node_threshold": 0.8701804876327515,
+      "schema_version": 1
+    },
+    {
+      "slug": "ngsa_baseline",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "Non",
+        "-",
+        "dominated",
+        " Sorting",
+        " Genetic",
+        " Algorithm",
+        " II",
+        " (",
+        "N"
+      ],
+      "prompt": "<bos>Non-dominated Sorting Genetic Algorithm II (N",
       "node_threshold": 0.8,
       "schema_version": 1
     }

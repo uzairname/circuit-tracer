@@ -362,7 +362,7 @@ class MultiGPUGraphEvaluator:
         n_nodes_list = torch.cat(all_n_nodes, dim=0).int().tolist()
         n_edges_list = torch.cat(all_n_edges, dim=0).int().tolist()
         
-        # Calculate fitness and update individuals
+        # Calculate objectives (NSGA-II multi-objective) and update individuals
         import math
         fitness_values = []
         for i, ind in enumerate(individuals):
@@ -375,20 +375,28 @@ class MultiGPUGraphEvaluator:
             log_nodes = math.log(max(n_nodes, 1))
             log_edges = math.log(max(n_edges, 1))
             
-            fitness = (
+            # Objective 0: Quality (maximize)
+            quality = (
                 self.hp.w_completeness * completeness +
-                self.hp.w_replacement * replacement -
-                self.hp.w_complexity_node * log_nodes -
+                self.hp.w_replacement * replacement
+            )
+            
+            # Objective 1: Complexity (minimize)
+            complexity = (
+                self.hp.w_complexity_node * log_nodes +
                 self.hp.w_complexity_edge * log_edges
             )
             
-            ind.fitness = fitness
+            ind.objectives = [quality, complexity]
             ind.completeness = completeness
             ind.replacement = replacement
             ind.n_nodes = n_nodes
             ind.n_edges = n_edges
             
-            fitness_values.append(fitness)
+            # Legacy single-objective fitness (for backwards compatibility)
+            ind.fitness = quality - complexity
+            
+            fitness_values.append(ind.fitness)
         
         return fitness_values
     
