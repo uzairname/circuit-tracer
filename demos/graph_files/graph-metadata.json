@@ -17,6 +17,32 @@
       "prompt": "<bos>The capital of state containing Dallas is",
       "node_threshold": 0.8,
       "schema_version": 1
+    },
+    {
+      "slug": "war_1711_17",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "The",
+        " war",
+        " lasted",
+        " from",
+        " the",
+        " year",
+        " ",
+        "1",
+        "7",
+        "1",
+        "1",
+        " to",
+        " ",
+        "1",
+        "7"
+      ],
+      "prompt": "<bos>The war lasted from the year 1711 to 17",
+      "node_threshold": 0.8,
+      "schema_version": 1
     }
   ]
 }
