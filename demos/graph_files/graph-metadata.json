@@ -43,6 +43,24 @@
       "prompt": "<bos>The war lasted from the year 1711 to 17",
       "node_threshold": 0.8,
       "schema_version": 1
+    },
+    {
+      "slug": "ndag",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "The",
+        " National",
+        " Digital",
+        " Analytics",
+        " Group",
+        " (",
+        "N"
+      ],
+      "prompt": "<bos>The National Digital Analytics Group (N",
+      "node_threshold": 0.8,
+      "schema_version": 1
     }
   ]
 }
