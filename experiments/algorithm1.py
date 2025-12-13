@@ -886,6 +886,12 @@ class GraphPrunerEA:
             'best_completeness': [],
             'best_replacement': [],
             'hypervolume': [],          # Optional: hypervolume indicator
+            'best_fitness': [],         # Best fitness (quality - complexity)
+            'median_fitness': [],       # Median fitness across population
+            'mean_quality': [],         # Mean quality across population
+            'median_quality': [],       # Median quality across population
+            'mean_complexity': [],      # Mean complexity across population
+            'median_complexity': [],    # Median complexity across population
         }
         
         # Evaluate initial population
@@ -914,7 +920,7 @@ class GraphPrunerEA:
         
         # Record initial generation (generation 0)
         pareto_front = fronts[0] if fronts else []
-        self._record_history(history, 0, pareto_front)
+        self._record_history(history, 0, pareto_front, population)
         
         for gen in range(self.hp.n_generations):
             if self.verbose:
@@ -970,7 +976,7 @@ class GraphPrunerEA:
             pareto_front = fronts[0] if fronts else []
             
             # Record history
-            self._record_history(history, gen + 1, pareto_front)
+            self._record_history(history, gen + 1, pareto_front, population)
                 
         return pareto_front, history
     
@@ -1002,7 +1008,7 @@ class GraphPrunerEA:
         
         return new_population
     
-    def _record_history(self, history: Dict, generation: int, pareto_front: List[Individual]):
+    def _record_history(self, history: Dict, generation: int, pareto_front: List[Individual], population: List[Individual] = None):
         """Record statistics for a generation."""
         history['generation'].append(generation)
         history['pareto_front_size'].append(len(pareto_front))
@@ -1034,6 +1040,55 @@ class GraphPrunerEA:
             history['best_completeness'].append(0.0)
             history['best_replacement'].append(0.0)
             history['hypervolume'].append(0.0)
+        
+        # Compute best and median fitness from the full population
+        if population:
+            evaluated = [ind for ind in population if ind.is_evaluated()]
+            fitness_values = [ind.fitness for ind in evaluated]
+            quality_values = [ind.objectives[0] for ind in evaluated]
+            complexity_values = [ind.objectives[1] for ind in evaluated]
+            
+            if fitness_values:
+                history['best_fitness'].append(max(fitness_values))
+                sorted_fitness = sorted(fitness_values)
+                n = len(sorted_fitness)
+                if n % 2 == 0:
+                    median = (sorted_fitness[n // 2 - 1] + sorted_fitness[n // 2]) / 2
+                else:
+                    median = sorted_fitness[n // 2]
+                history['median_fitness'].append(median)
+                
+                # Mean and median quality
+                history['mean_quality'].append(sum(quality_values) / len(quality_values))
+                sorted_quality = sorted(quality_values)
+                n = len(sorted_quality)
+                if n % 2 == 0:
+                    history['median_quality'].append((sorted_quality[n // 2 - 1] + sorted_quality[n // 2]) / 2)
+                else:
+                    history['median_quality'].append(sorted_quality[n // 2])
+                
+                # Mean and median complexity
+                history['mean_complexity'].append(sum(complexity_values) / len(complexity_values))
+                sorted_complexity = sorted(complexity_values)
+                n = len(sorted_complexity)
+                if n % 2 == 0:
+                    history['median_complexity'].append((sorted_complexity[n // 2 - 1] + sorted_complexity[n // 2]) / 2)
+                else:
+                    history['median_complexity'].append(sorted_complexity[n // 2])
+            else:
+                history['best_fitness'].append(0.0)
+                history['median_fitness'].append(0.0)
+                history['mean_quality'].append(0.0)
+                history['median_quality'].append(0.0)
+                history['mean_complexity'].append(0.0)
+                history['median_complexity'].append(0.0)
+        else:
+            history['best_fitness'].append(0.0)
+            history['median_fitness'].append(0.0)
+            history['mean_quality'].append(0.0)
+            history['median_quality'].append(0.0)
+            history['mean_complexity'].append(0.0)
+            history['median_complexity'].append(0.0)
     
     def _compute_hypervolume(self, pareto_front: List[Individual]) -> float:
         """

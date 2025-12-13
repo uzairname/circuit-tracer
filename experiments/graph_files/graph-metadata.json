@@ -91,7 +91,7 @@
         "N"
       ],
       "prompt": "<bos>Non-dominated Sorting Genetic Algorithm II (N",
-      "node_threshold": 0.8701804876327515,
+      "node_threshold": 0.827899694442749,
       "schema_version": 1
     },
     {
@@ -111,6 +111,54 @@
         "N"
       ],
       "prompt": "<bos>Non-dominated Sorting Genetic Algorithm II (N",
+      "node_threshold": 0.8,
+      "schema_version": 1
+    },
+    {
+      "slug": "war_ea",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "The",
+        " war",
+        " lasted",
+        " from",
+        " ",
+        "1",
+        "7",
+        "1",
+        "2",
+        " to",
+        " ",
+        "1",
+        "7"
+      ],
+      "prompt": "<bos>The war lasted from 1712 to 17",
+      "node_threshold": 0.9345417022705078,
+      "schema_version": 1
+    },
+    {
+      "slug": "war_baseline",
+      "scan": "mntss/gemma-scope-transcoders",
+      "transcoder_list": [],
+      "prompt_tokens": [
+        "<bos>",
+        "The",
+        " war",
+        " lasted",
+        " from",
+        " ",
+        "1",
+        "7",
+        "1",
+        "2",
+        " to",
+        " ",
+        "1",
+        "7"
+      ],
+      "prompt": "<bos>The war lasted from 1712 to 17",
       "node_threshold": 0.8,
       "schema_version": 1
     }
